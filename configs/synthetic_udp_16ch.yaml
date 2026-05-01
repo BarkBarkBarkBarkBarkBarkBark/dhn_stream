@@ -1,0 +1,38 @@
+session:
+  name: synthetic_udp_16ch_test
+  description: SpikeInterface synthetic recording sent as headerless UDP into DHN-AQ.
+
+udp:
+  host: "192.168.3.50"
+  port: 26090
+  broadcast: false
+  send_buffer_bytes: 8388608
+
+signal:
+  source: spikeinterface_generate_ground_truth_recording
+  channels: 16
+  units: 8
+  sample_rate_hz: 32000
+  duration_seconds: 60
+  seed: 42
+
+payload:
+  dtype: int16
+  endianness: little
+  layout: sample_major
+  frames_per_packet: 1
+  target_peak_int16: 8000
+  headerless: true
+
+pacing:
+  realtime: true
+  speed: 1.0
+
+dhn_aq:
+  expected_receive_mode: pure_udp_no_header
+  expected_channel_count: 16
+  expected_sample_rate_hz: 32000
+  notes:
+    - Configure DHN-AQ channel spec to exactly match channel count and sample rate.
+    - Start tcpdump before starting DHN-AQ recording.
+    - Start with 16 channels before attempting 512 channels.
