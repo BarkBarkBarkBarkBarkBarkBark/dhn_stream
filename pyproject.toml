@@ -5,28 +5,23 @@ build-backend = "hatchling.build"
 [project]
 name = "dhn_client"
 version = "0.1.0"
-description = "Synthetic UDP acquisition pipeline for DHN-AQ with MED verification"
+description = "Neuralynx NRD UDP streamer for DHN_Acq + MED verification"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
-    "scipy",
-    "pydantic>=2.0",
-    "pydantic-settings",
     "typer",
     "rich",
-    "spikeinterface",
-    "dhn-med-py",
-    "pyyaml",
-    "django>=4.2",
-    "channels>=4.0",
-    "daphne>=4.0",
-    "psutil>=5.9",
 ]
 
+[project.optional-dependencies]
+spike  = ["spikeinterface", "scipy"]
+verify = ["dhn-med-py"]
+dashboard = ["fastapi", "uvicorn", "openpyxl"]
+dev    = ["pytest", "ruff", "mypy"]
+
 [project.scripts]
-dhn-sine-udp  = "darkhorse_neuralynx.udp_raw.harmonic_sender:app"
-dhn-si-udp    = "darkhorse_neuralynx.udp_raw.synthetic_sender:app"
-dhn-udp-probe = "darkhorse_neuralynx.udp_raw.probe_receiver:app"
+dhn-stream     = "darkhorse_neuralynx.cli:app"
+dhn-probe      = "darkhorse_neuralynx.udp_raw.probe:app"
 dhn-verify-med = "darkhorse_neuralynx.verify.med_verify:app"
 
 [tool.hatch.build.targets.wheel]
@@ -34,8 +29,7 @@ packages = ["src/darkhorse_neuralynx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-DJANGO_SETTINGS_MODULE = "dhn_web.settings"
-pythonpath = ["webapp", "src"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100

@@ -28,24 +28,16 @@ uv venv --python 3.11 .venv
 echo "[dhn-client] Activating venv..."
 source .venv/bin/activate
 
-echo "[dhn-client] Installing package and dependencies..."
+echo "[dhn-stream] Installing package and dependencies..."
 uv pip install --upgrade pip
 uv pip install -e .
 uv pip install \
   numpy \
   scipy \
-  pydantic \
-  pydantic-settings \
   typer \
   rich \
   spikeinterface \
   dhn-med-py \
-  mne \
-  mne-lsl \
-  pylsl \
-  zarr \
-  pandas \
-  pyarrow \
   pytest \
   ruff \
   mypy \
@@ -55,11 +47,9 @@ echo "[dhn-client] Verifying imports..."
 python - <<'PY'
 import numpy
 import spikeinterface
-import mne_lsl
 print("OK: numpy", numpy.__version__)
 print("OK: spikeinterface imported")
-print("OK: mne_lsl imported")
 PY
 
-echo "[dhn-client] Done."
+echo "[dhn-stream] Done."
 echo "Activate with: source .venv/bin/activate"

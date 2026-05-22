@@ -1,0 +1,205 @@
+# =============================================================================
+# DHN smoke tests — dhn_stream → DHN_Acq UDP path
+# =============================================================================
+# Purpose
+#   Declarative spec used to evaluate whether `dhn_stream` packets are
+#   decodable by DHN_Acq. Two formats are tracked:
+#
+#     1. current_format       — what `AtlasUdpSender` emits today (custom).
+#     2. target_nrd_format    — Neuralynx NRD UDP wire format that DHN_Acq
+#                               actually expects (per Matt @ NLX, Apr 2026).
+#
+#   The `assertions` section drives a pcap-based smoke test executed on the
+#   DHN_Acq host. See `dhn_stream/docs/api-smoke-tests.md` (TBD) for the
+#   capture procedure.
+#
+# Reference
+#   - Matt's email (NLX, ~Apr 2026): "data needs to be sent in NLX packets …
+#     header bytes + (4 * number of channels) + (4 trailing CRC bytes) …
+#     DHN will figure out the sampling rate based on the packet rate."
+#   - Atlas → Pegasus stream: write-only UDP, Atlas 192.168.3.10 →
+#     Pegasus 192.168.3.100 (configurable), second fiber port.
+#   - Primary fiber port is bidirectional (HW reference setup, start/stop) and
+#     is OUT OF SCOPE for this smoke test.
+# =============================================================================
+
+meta:
+  spec_version: 0.1
+  source_module: dhn_stream/src/darkhorse_neuralynx/udp_raw/atlas_sender.py
+  receiver: DHN_Acq (Linux)
+  reference_email: "Matt @ NLX, 2026-04 (see chat thread)"
+  status: draft  # set to `verified` after Phase C ground-truth pcap diff
+
+# -----------------------------------------------------------------------------
+# Network topology
+# -----------------------------------------------------------------------------
+network:
+  atlas_ip: 192.168.3.10           # source on real hardware
+  pegasus_ip: 192.168.3.100        # default Pegasus IP (configurable)
+  dhn_acq_listen_ip: 192.168.3.50  # from configs/synthetic_udp_16ch.yaml
+  port: 26090                       # ATLAS data port (DHN_Acq listens here)
+  control_port: 26011               # primary fiber, bidirectional, OUT OF SCOPE
+  direction: write_only_udp         # secondary fiber, one-way
+  receive_mode: broadcast_or_unicast
+  # Note: DHN_Acq_rc.txt has `Receive As Broadcast: YES`. Current
+  # configs/synthetic_udp_16ch.yaml sends UNICAST to 192.168.3.50 with
+  # broadcast=false. This is consistent (unicast to the listen IP works in
+  # broadcast-mode receive) but worth flagging on real hardware tests.
+
+# -----------------------------------------------------------------------------
+# CURRENT FORMAT — what dhn_stream emits today (NOT decodable by DHN_Acq)
+# -----------------------------------------------------------------------------
+current_format:
+  name: dhn_stream_chunked_v0
+  module: udp_raw/atlas_sender.py
+  fixed_size_bytes: 1044
+  endianness: little
+  header:
+    - { offset:  0, size: 8, type: uint64, name: timestamp_us }
+    - { offset:  8, size: 4, type: uint32, name: channel_number }
+    - { offset: 12, size: 4, type: uint32, name: sample_freq_hz }
+    - { offset: 16, size: 4, type: uint32, name: num_valid_samples }
+  payload:
+    type: int16
+    count: 512
+    note: zero-padded if num_valid_samples < 512
+  trailer: none
+  packet_grouping: one_per_channel_per_chunk
+  decodable_by_dhn_acq: false
+  blocker_summary: >
+    Custom invented header, int16 not int32, no STX sync marker, no CRC,
+    one packet per channel (NRD expects one packet per timestep covering
+    all channels).
+
+# -----------------------------------------------------------------------------
+# TARGET NRD FORMAT — what DHN_Acq actually decodes
+# -----------------------------------------------------------------------------
+# Header layout below is the widely-documented Neuralynx Cheetah/Pegasus NRD
+# packet. MUST be confirmed against (a) the NLX formatting doc Matt offered
+# and (b) a pcap capture from a real Pegasus replay session before Phase D
+# is considered "verified".
+target_nrd_format:
+  name: neuralynx_nrd_udp
+  endianness: little
+  header_size_bytes: 68
+  header_words_int32: 17
+  variable_size_formula: "header_size_bytes + 4 * n_channels + 4"
+  header:
+    - { offset:  0, size: 4, type: uint32,    name: stx,             value: 0x00000800 }
+    - { offset:  4, size: 4, type:  int32,    name: packet_id }
+    - { offset:  8, size: 4, type:  int32,    name: size_int32_words } # = n_channels + 14 (status words after size)
+    - { offset: 12, size: 4, type: uint32,    name: timestamp_high }   # microseconds, upper 32 bits
+    - { offset: 16, size: 4, type: uint32,    name: timestamp_low }    # microseconds, lower 32 bits
+    - { offset: 20, size: 4, type:  int32,    name: status }
+    - { offset: 24, size: 4, type: uint32,    name: parallel_port }    # TTL bits
+    - { offset: 28, size: 40, type: 'int32[10]', name: extras }        # board status / reserved
+  payload:
+    type: int32
+    count: n_channels
+    note: one sample per channel per packet (one packet = one sample timestep)
+  trailer:
+    - { size: 4, type: uint32, name: crc }
+    # CRC algorithm: XOR of all preceding int32 words (NLX convention).
+    # Verify against a real capture; if NLX uses CRC32 instead, swap impl.
+  packet_grouping: one_per_timestep_all_channels
+  sample_rate_inference: packet_rate_hz
+  decodable_by_dhn_acq: true
+
+# -----------------------------------------------------------------------------
+# Test scenarios
+# -----------------------------------------------------------------------------
+scenarios:
+  - id: synthetic_16ch_32k
+    n_channels: 16
+    sample_rate_hz: 32000
+    duration_s: 5
+    expected_packet_rate_hz: 32000
+    expected_packet_size_bytes: 136    # 68 header + 16*4 samples + 4 CRC
+    expected_total_packets: 160000
+    expected_throughput_mbps: 34.82    # 136 * 8 * 32000 / 1e6
+  - id: clinical_512ch_32k
+    n_channels: 512
+    sample_rate_hz: 32000
+    duration_s: 5
+    expected_packet_rate_hz: 32000
+    expected_packet_size_bytes: 2120   # 68 header + 512*4 samples + 4 CRC
+    expected_total_packets: 160000
+    expected_throughput_mbps: 542.72
+
+# -----------------------------------------------------------------------------
+# Assertions — checked against a captured pcap on the DHN_Acq host
+# -----------------------------------------------------------------------------
+assertions:
+  - id: stx_present
+    rule: "every_packet[0:4] == bytes.fromhex('00080000')"
+    severity: critical
+  - id: fixed_packet_size
+    rule: "len(set(packet.length for packet in pcap)) == 1"
+    severity: critical
+  - id: packet_size_matches_channels
+    rule: "packet.length == 68 + 4*n_channels + 4"
+    severity: critical
+  - id: int32_payload_dtype
+    rule: "(packet.length - 72) % 4 == 0"
+    severity: critical
+  - id: crc_valid
+    rule: "xor_int32(packet[:-4]) == int.from_bytes(packet[-4:], 'little')"
+    severity: critical
+  - id: monotonic_packet_id
+    rule: "all(diff(packet_id) == 1)"
+    severity: high
+  - id: monotonic_timestamp
+    rule: "all(diff(timestamp_us) > 0) and not constant(diff(timestamp_us))"
+    severity: high
+  - id: packet_rate_matches_fs
+    rule: "abs(packet_rate_hz - sample_rate_hz) / sample_rate_hz < 0.01"
+    severity: critical
+  - id: dhn_acq_no_drop_log
+    rule: "grep -E 'dropped|invalid|bad packet' dhn_acq.log returns no matches"
+    severity: high
+
+# -----------------------------------------------------------------------------
+# Capture procedure (manual, run on DHN_Acq host)
+# -----------------------------------------------------------------------------
+capture_procedure:
+  - "Identify interface receiving 26090: `ip -br addr` then match against DHN_Acq_rc.txt"
+  - "Start capture: sudo tcpdump -i <iface> -w /tmp/dhn.pcap 'udp port 26090'"
+  - "Start streamer on sender host: dhn-stream stream --host <dhn_acq_ip> --channels 16 --sample-rate 32000 --duration 5"
+  - "Stop tcpdump after 7 s"
+  - "Validate sizes: tshark -r /tmp/dhn.pcap -T fields -e udp.length | sort | uniq -c"
+  - "Validate STX: tshark -r /tmp/dhn.pcap -x | head -40   # bytes 0-3 should be 00 08 00 00"
+  - "Run smoke runner: pytest dhn_stream/tests/test_smoke_pcap.py --pcap /tmp/dhn.pcap --scenario synthetic_16ch_32k"
+
+# -----------------------------------------------------------------------------
+# Viability summary
+# -----------------------------------------------------------------------------
+viability_summary:
+  current_streamer_decodable: false
+  blocker: >
+    Wire format mismatch on every dimension: packet grouping (per-channel
+    chunks vs per-timestep), sample width (int16 vs int32), header layout
+    (custom 20-byte vs NLX 72-byte with STX), no CRC trailer.
+  required_work:
+    - "Implement udp_raw/nrd_sender.py per target_nrd_format"
+    - "Make NRD the default in dhn-stream stream; gate legacy behind --legacy-chunked"
+    - "Rewrite dhn_client/relay.py _build_csc_packet to emit real NRD"
+    - "Confirm header layout + CRC algorithm against a Pegasus-replay pcap"
+  optional_keep:
+    - "Existing chunked sender (rename → LegacyChunkedSender) is still useful for the dashboard probe"
+
+# -----------------------------------------------------------------------------
+# Open questions (must resolve before declaring spec `verified`)
+# -----------------------------------------------------------------------------
+open_questions:
+  - id: nrd_header_size
+    question: "Is the NRD header exactly 72 bytes (18 int32 words) for ATLAS firmware?"
+    resolution: "Request NLX formatting doc from Matt; cross-check pcap from real Pegasus."
+  - id: crc_algorithm
+    question: "Is the trailing checksum int32 XOR or CRC32?"
+    resolution: "Verify by recomputing both over a real captured packet."
+  - id: status_block_layout
+    question: "Are the 10 extras int32 words documented or reserved/zero?"
+    resolution: "Check NLX doc; capture from live system to see typical values."
+  - id: timestamp_word_order
+    question: "Is the 64-bit ts split as (high, low) or (low, high) on the wire?"
+    resolution: "Decode candidate packet both ways; correct order yields a monotonic, ~1/fs-spaced sequence."

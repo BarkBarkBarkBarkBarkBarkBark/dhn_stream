@@ -1,192 +1,188 @@
-# DHN Client: Synthetic UDP Acquisition Bench
+# DHN NRD Streamer
 
-This project generates synthetic electrophysiology data using SpikeInterface, sends it as **pure headerless UDP** to DHN-AQ, records it as MED, and verifies the MED output with `dhn-med-py`. The first milestone covers only the synthetic-data path. LSL is optional and is never placed in front of DHN-AQ.
+Minimum-viable command-line tools for sending Neuralynx NRD UDP packets into `DHN_Acq`.
 
----
-
-## System Architecture
-
-```
-SpikeInterface synthetic recording
-    └─> Python headerless UDP sender  (dhn-si-udp)
-            └─> DHN-AQ receiver
-                    └─> MED output directory
-                            └─> dhn-med-py verification  (dhn-verify-med)
-
-Optional (Milestone 2, not required):
-    └─> LSL outlet  ──> MNE-LSL realtime analysis
+```text
+synthetic source  →  dhn-stream stream  →  NRD UDP packets on :26090  →  DHN_Acq  →  MED
 ```
 
-**DHN-AQ receives pure UDP — no custom application header.** Channel count, sample rate, dtype, and channel order are configured inside DHN-AQ, not in the payload.
+Three commands:
 
----
+| Command            | Purpose                                                    |
+|--------------------|------------------------------------------------------------|
+| `dhn-stream`       | Emit NRD UDP packets (harmonic or SpikeInterface source)   |
+| `dhn-probe`        | Bind a UDP port and report packet/byte rate (sanity check) |
+| `dhn-verify-med`   | Verify a recorded MED session matches expectations         |
 
-## Requirements
-
-- Linux workstation (Ubuntu 22.04+ recommended)
-- Python 3.11
-- [`uv`](https://github.com/astral-sh/uv) — fast Python package manager
-- DHN-AQ installed and configured separately on this machine or reachable over the network
-- `tcpdump` — to prove packets leave the NIC before blaming DHN-AQ
-
----
+Format reference: [docs/nrd-format.md](docs/nrd-format.md).
 
 ## Install
 
 ```bash
+cd /home/dhn/Documents/development/dhn_stream
 chmod +x scripts/install_dev.sh
 ./scripts/install_dev.sh
-
-# Activate the virtual environment for subsequent terminal sessions:
 source .venv/bin/activate
+
+# Optional extras
+uv pip install -e '.[spike]'   # SpikeInterface synthetic source
+uv pip install -e '.[verify]'  # dhn-verify-med
+uv pip install -e '.[dashboard]' # browser waveform/metrics inspector
+uv pip install -e '.[dev]'     # pytest / ruff / mypy
 ```
 
-The script installs system packages (requires `sudo`), creates a Python 3.11 virtualenv with `uv`, installs all runtime and dev dependencies, and verifies key imports.
+Core dependencies are `numpy`, `typer`, `rich`. Everything else is opt-in.
 
----
-
-## Configure DHN-AQ
-
-DHN-AQ must be configured to **match the sender exactly**. Mismatches cause silent data corruption or no output.
-
-| DHN-AQ setting         | Must match                              |
-|------------------------|-----------------------------------------|
-| Receive interface/IP   | NIC address the sender targets          |
-| UDP port               | `configs/synthetic_udp_16ch.yaml → udp.port` (default 26090) |
-| Channel count          | `signal.channels` (default 16)          |
-| Sample rate            | `signal.sample_rate_hz` (default 32000 Hz) |
-| Data type              | int16, little-endian                    |
-| Layout                 | sample-major (frame0_ch0, frame0_ch1, … frame1_ch0, …) |
-| Output directory       | wherever you want MED written           |
-
-**Before running:** assign the expected IP to your NIC if needed:
+## Quick Start: Harmonic NRD Stream
 
 ```bash
-sudo ip addr add 192.168.3.50/24 dev eno1
-ip addr && ip route    # confirm
+dhn-stream stream --host 127.0.0.1 --channels 4 --sample-rate 32000 --peak 100000
 ```
 
----
+For a remote DHN_Acq host:
 
-## Run Local UDP Probe Test
-
-Use this to confirm packets are leaving the sender **before involving DHN-AQ**.
-
-**Terminal 1 — receiver:**
 ```bash
-dhn-udp-probe --host 0.0.0.0 --port 26090 --expected-bytes 32 --show-samples 4
+dhn-stream stream --host 192.168.3.50 --channels 4 --sample-rate 32000 --peak 100000
 ```
 
-**Terminal 2 — sender:**
+Packet size for 4 channels = `68 + 4*4 + 4 = 88 bytes`. `DHN_Acq` should report `32000 Hz` and the configured channel count.
+
+## SpikeInterface Source
+
 ```bash
-dhn-si-udp --host 127.0.0.1 --port 26090 \
-    --channels 16 --sample-rate 32000 \
-    --duration 10 --frames-per-packet 1
+dhn-stream stream \
+  --source spikeinterface \
+  --channels 8 --units 8 --sample-rate 32000 \
+  --recording-seconds 30 \
+  --peak 100000 --noise-std 5000 \
+  --seed 42
 ```
 
-Pass criteria:
-- Probe prints packet rate ≈ 32000 pkt/s (one frame per packet at 32 kHz)
-- No sender crash
-- `Last payload (bytes)` = 32 (16 channels × 2 bytes)
+Tuning amplitudes (NRD samples are 24-bit-style ADC counts, FS ≈ ±8.4M):
 
----
+| Look       | `--peak` | `--noise-std` |
+|------------|----------|---------------|
+| subtle     | 50_000   | 2_500         |
+| default    | 100_000  | 5_000         |
+| prominent  | 400_000  | 15_000        |
+| loud       | 2_000_000 | 50_000       |
 
-## Run DHN-AQ Recording Test
+Scaling: `--peak` maps to the **spike-peak** amplitude (99.99th percentile of |traces|), so spikes show clearly above the noise floor on `DHN_Acq`'s ~24-bit ADC display.
 
-### Step-by-step
+## Replay a Real `.nrd` File
 
-1. Configure DHN-AQ (see above).
-2. Assign NIC IP if needed.
-3. **Terminal 1 — watch packets on the wire:**
-   ```bash
-   sudo tcpdump -ni eno1 udp port 26090 -vv
-   ```
-4. **Start DHN-AQ recording.**
-5. **Terminal 2 — run synthetic sender:**
-   ```bash
-   dhn-si-udp --config configs/synthetic_udp_16ch.yaml
-   ```
-6. After the sender finishes (60 s), **stop DHN-AQ recording cleanly**.
+Channel count is auto-detected from the file (by measuring the byte distance between the first two STX sync words). Override with `--channels` if needed.
 
-### With a custom config override:
 ```bash
-dhn-si-udp --config configs/synthetic_udp_16ch.yaml --channels 64 --duration 30
+dhn-stream stream \
+  --source nrd-file --file /mnt/MED_Data_iSSD/RawData.nrd \
+  --host 127.0.0.1 --sample-rate 32000
 ```
 
-### Dry-run (no packets sent):
+Replay stops at EOF and prints `Yayy!! Replay Done!`. Use `--duration` to stop earlier. The original file packet IDs and timestamps are discarded; the sender emits its own monotonic IDs and fractional-µs timestamps so DHN_Acq reports the rate cleanly. Throughput at 512 ch / 32 kHz is ~540 Mbit/s — verify your NIC and `--send-buffer` (default 8 MB) can keep up.
+
+### Prime DHN_Acq Before Replaying
+
+Use `--prime-until-enter` when DHN_Acq needs to see a live, correctly shaped NRD stream before you start recording. The streamer first sends zero-valued packets with the channel count detected from the `.nrd` file. After DHN_Acq is recording, return to the terminal and press Enter; the same sender continues with the real file replay without resetting packet IDs or timestamps.
+
 ```bash
-dhn-si-udp --config configs/synthetic_udp_16ch.yaml --dry-run
+dhn-stream stream \
+  --source nrd-file --file /mnt/MED_Data_iSSD/DA-075-RawData.nrd \
+  --host 127.0.0.1 --sample-rate 32000 \
+  --prime-until-enter
 ```
 
----
+The captured output will contain a zero pre-roll followed by the real replay. That pre-roll is intentional; it keeps the acquisition session alive early enough that comparisons against the original uncompressed `.nrd` do not lose the first seconds of real data.
+
+To inspect the stream in the dashboard while DHN_Acq receives the main packets, mirror a copy to a separate UDP port:
+
+```bash
+dhn-stream stream \
+  --source nrd-file --file /mnt/MED_Data_iSSD/DA-075-RawData.nrd \
+  --host 127.0.0.1 --sample-rate 32000 \
+  --prime-until-enter \
+  --mirror-host 127.0.0.1 --mirror-port 26091
+```
+
+## Live Waveform Dashboard
+
+The optional dashboard is a local browser inspector for packet health, channel metrics, labels, and decimated waveform previews. It listens on a mirror UDP port by default so it does not compete with DHN_Acq for Neuralynx port `26090`.
+
+```bash
+dhn-stream dashboard \
+  --web-host 127.0.0.1 --web-port 8000 \
+  --udp-host 127.0.0.1 --udp-port 26091 \
+  --sample-rate 32000 \
+  --file /mnt/MED_Data_iSSD/DA-075-RawData.nrd \
+  --channel-config /home/dhn/DHN/DHN_Acq/DHN_Acq_cs.csv \
+  --connection-map /mnt/MED_Data_iSSD/DA075_connection_map.xlsx
+```
+
+Open `http://127.0.0.1:8000`. The dashboard shows packet rate, throughput, parse errors, packet/timestamp gaps, a dense channel grid, quality labels, and a click-through waveform view. Waveforms are min/max decimated for inspection; use the recorded `.nrd`/MED data for lossless comparisons.
+
+## Inspect `.nrd` Signal Statistics
+
+```bash
+dhn-stream stats \
+  --file /mnt/MED_Data_iSSD/RawData.nrd \
+  --sample-rate 32000 \
+  --report-json runs/nrd-stats.json
+```
+
+The stats command streams through the file and reports per-channel min, max, mean, standard deviation, RMS, mean absolute amplitude, max absolute amplitude, and simple channel-quality labels. Use `--seconds` or `--max-packets` for a quick partial scan of a large file.
+
+```bash
+dhn-stream stats --file /mnt/MED_Data_iSSD/RawData.nrd --sample-rate 32000 --seconds 10
+```
+
+`flat` channels have near-zero amplitude by the configured thresholds. `noise-like` and `signal-like` are heuristics based on peak/RMS shape, not biological classification. Micro/macro electrode labels are only reported when the `.nrd` header has recognizable per-channel metadata; otherwise they are shown as `unknown`.
+
+## DHN_Acq Receiver Setup
+
+In `DHN_Acq_rc.txt` set:
+
+| Field                          | Value                                  |
+|--------------------------------|----------------------------------------|
+| `Receiving Server IP Address`  | sender host (e.g. `127.0.0.1`)         |
+| `Receiving Port Number`        | `26090`                                |
+| `Receive As Broadcast`         | `NO` (or `YES` if broadcasting)        |
+| `Network Interface`            | the NIC the stream arrives on          |
+
+Channel count in `DHN_Acq_cs.csv` must match `--channels`.
+
+## Sanity-Check the Stream
+
+```bash
+# Receive-side: what's actually arriving on the port?
+dhn-probe --port 26090 --expected-bytes 88
+
+# Wire-level: confirm STX 00 08 00 00 in every packet
+sudo tcpdump -ni <iface> -XX 'udp port 26090' | head -40
+```
 
 ## Verify MED Output
 
 ```bash
 dhn-verify-med \
-    --med-path /mnt/dhn/recordings/<SESSION>.medd \
-    --expect-channels 16 \
-    --expect-sample-rate 32000 \
-    --read-seconds 5 \
-    --report-json runs/synthetic_16ch_report.json
+  --med-path /path/to/session.medd \
+  --expect-channels 8 --expect-sample-rate 32000 \
+  --read-seconds 5 \
+  --report-json runs/report.json
 ```
 
-The verifier checks:
-- MED path exists and session opens
-- Channel count matches
-- Sample rate matches (if metadata exposes it)
-- At least 5 seconds of data can be read
-- Signal is nonzero
-- Per-channel mean/std/min/max are printed in a table
-
-Exit code 0 = all checks pass. Exit code 1 = at least one failure.
-
----
-
-## Run Unit Tests
-
-Tests do not require DHN-AQ or a network connection.
+## Tests
 
 ```bash
-pytest tests/ -v
+PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest tests/ -q
 ```
-
-Covers:
-- `test_scaling.py` — int16 scaling correctness and edge cases
-- `test_serialization.py` — sample-major and channel-major byte layout
-- `test_config.py` — YAML config loading, defaults, and partial overrides
-
----
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
-|---------|-------------|
-| `tcpdump` sees no packets | Sender network config or wrong NIC/IP |
-| Packets visible in `tcpdump` but no MED output | DHN-AQ config mismatch (port, IP, channel count) |
-| MED exists but data is scrambled / channels swapped | dtype, layout (sample-major vs channel-major), or channel spec mismatch in DHN-AQ |
-| Works at 16 channels, fails at 512 | Packet rate / CPU / NIC tuning; check underrun count in sender output |
-| MED verifier reports zero signal | DHN-AQ received packets but recorded silence — check gain/scale settings in DHN-AQ |
-
-**Always start with 16 channels and 1 frame per packet.** Only increase channel count after 16-channel MED readback is confirmed correct.
-
----
-
-## Channel / Packet Scaling Path
-
-```
-16 ch  × 1 frame/pkt  →  32 bytes/pkt   ✓ start here
-64 ch  × 1 frame/pkt  →  128 bytes/pkt
-128 ch × 1 frame/pkt  →  256 bytes/pkt
-512 ch × 1 frame/pkt  →  1024 bytes/pkt  ⚠ near MTU limit
-```
-
-For 512-channel configurations, one frame is 1024 bytes — below standard Ethernet MTU. Multiple frames per packet may exceed MTU and cause fragmentation unless jumbo frames are configured on both sides.
-
----
-
-## Next Milestones
-
-1. **Milestone 2** — Optional LSL mirror: send one copy to DHN-AQ as pure UDP; publish a second copy to an LSL outlet for MNE-LSL realtime analysis.
-2. **Milestone 3** — NRD-derived source adapter: extract samples from `.nrd` files (via vendor replay, `nrd2dat`, or custom parser) and reuse the same UDP sender.
-3. **Future** — Automated run reports, hospital deployment notes, CI pipeline.
+| Symptom                              | Likely cause                                                                |
+|--------------------------------------|-----------------------------------------------------------------------------|
+| `DHN_Acq` reports `32258 Hz`         | Old sender; integer-µs timestamp step. Pull latest.                         |
+| `DHN_Acq` reports `-2147483648 Hz`   | Receiver is decoding non-NRD bytes. Check `dhn-stream` was actually used.   |
+| Traces are flat                      | `--peak` too low for the display.                                           |
+| Traces fill the lane vertically      | `--peak` too high; DHN_Acq autoscales per channel.                          |
+| `tcpdump` sees nothing               | Wrong interface, host IP, or `DHN_Acq` is bound to a different NIC.         |
+| `SpikeInterface` import error        | `uv pip install -e '.[spike]'`.                                             |
