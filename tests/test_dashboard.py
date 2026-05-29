@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import socket
+
 import numpy as np
 import pytest
 
-from darkhorse_neuralynx.dashboard.labels import load_channel_config_csv, merge_labels
+from darkhorse_neuralynx.dashboard.labels import load_channel_config_csv, load_connection_map, merge_labels
 from darkhorse_neuralynx.dashboard.monitor import LiveNrdMonitor, min_max_downsample
 from darkhorse_neuralynx.udp_raw.nrd_sender import build_nrd_packet
 
@@ -31,6 +33,23 @@ def test_merge_labels_fills_missing_channels(tmp_path) -> None:
     labels = merge_labels(3, load_channel_config_csv(path))
 
     assert [label.name for label in labels] == ["ch0001", "named_two", "ch0003"]
+
+
+def test_connection_map_expands_channel_ranges(tmp_path) -> None:
+    path = tmp_path / "map.csv"
+    path.write_text(
+        "Electrode Label,Electrode Description,Electrode Type,Channel Range (CSC#) Start,Channel Range (CSC#) END\n"
+        "A',L Amygdala,BF MICROS,257,259\n",
+        encoding="utf-8",
+    )
+
+    labels = load_connection_map(path)
+
+    assert labels[257].name == "A'1"
+    assert labels[258].name == "A'2"
+    assert labels[259].name == "A'3"
+    assert labels[257].electrode_type == "micro"
+    assert labels[257].description == "L Amygdala"
 
 
 def test_min_max_downsample_preserves_extrema() -> None:
@@ -71,6 +90,19 @@ def test_live_monitor_counts_parse_errors() -> None:
     snapshot = monitor.snapshot()
     assert snapshot["parse_errors"] == 1
     assert snapshot["packet_count"] == 0
+
+
+def test_live_monitor_udp_bind_error_is_synchronous() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    monitor = LiveNrdMonitor(expected_channels=2)
+    try:
+        with pytest.raises(OSError):
+            monitor.start_udp_listener("127.0.0.1", port)
+    finally:
+        monitor.stop()
+        sock.close()
 
 
 def test_dashboard_app_import_guard() -> None:

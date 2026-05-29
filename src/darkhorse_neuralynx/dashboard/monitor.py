@@ -72,8 +72,12 @@ class LiveNrdMonitor:
         """Start a background UDP listener."""
         if self._thread and self._thread.is_alive():
             return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.5)
+        sock.bind((host, port))
+        self._sock = sock
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._listen_udp, args=(host, port), daemon=True)
+        self._thread = threading.Thread(target=self._listen_udp, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -211,11 +215,10 @@ class LiveNrdMonitor:
             self.sum_abs = np.array([], dtype=np.float64)
             self.waveforms = None
 
-    def _listen_udp(self, host: str, port: int) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-        sock.bind((host, port))
-        self._sock = sock
+    def _listen_udp(self) -> None:
+        sock = self._sock
+        if sock is None:
+            return
         try:
             while not self._stop_event.is_set():
                 try:

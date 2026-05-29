@@ -27,11 +27,10 @@ source .venv/bin/activate
 # Optional extras
 uv pip install -e '.[spike]'   # SpikeInterface synthetic source
 uv pip install -e '.[verify]'  # dhn-verify-med
-uv pip install -e '.[dashboard]' # browser waveform/metrics inspector
 uv pip install -e '.[dev]'     # pytest / ruff / mypy
 ```
 
-Core dependencies are `numpy`, `typer`, `rich`. Everything else is opt-in.
+Core dependencies are `numpy`, `typer`, `rich`. The browser dashboard uses the Python standard library HTTP server by default. Everything else is opt-in.
 
 ## Quick Start: Harmonic NRD Stream
 
@@ -101,22 +100,18 @@ dhn-stream stream \
   --source nrd-file --file /mnt/MED_Data_iSSD/DA-075-RawData.nrd \
   --host 127.0.0.1 --sample-rate 32000 \
   --prime-until-enter \
-  --mirror-host 127.0.0.1 --mirror-port 26091
+  --dashboard-mirror
 ```
 
 ## Live Waveform Dashboard
 
-The optional dashboard is a local browser inspector for packet health, channel metrics, labels, and decimated waveform previews. It listens on a mirror UDP port by default so it does not compete with DHN_Acq for Neuralynx port `26090`.
+The optional dashboard is a local browser inspector for packet health, channel metrics, labels, and decimated waveform previews. It listens on mirror UDP port `26091` by default so it does not compete with DHN_Acq for Neuralynx port `26090`. On the standard DHN workstation, the dashboard defaults to `127.0.0.1:8000`, sample rate `32000`, `/home/dhn/DHN/DHN_Acq/DHN_Acq_cs.csv`, `/mnt/MED_Data_iSSD/DA075_connection_map.xlsx`, and `/mnt/MED_Data_iSSD/DA-075-RawData.nrd` when those files exist.
 
 ```bash
-dhn-stream dashboard \
-  --web-host 127.0.0.1 --web-port 8000 \
-  --udp-host 127.0.0.1 --udp-port 26091 \
-  --sample-rate 32000 \
-  --file /mnt/MED_Data_iSSD/DA-075-RawData.nrd \
-  --channel-config /home/dhn/DHN/DHN_Acq/DHN_Acq_cs.csv \
-  --connection-map /mnt/MED_Data_iSSD/DA075_connection_map.xlsx
+dhn-stream dashboard
 ```
+
+Override any default when needed, for example `--web-port 8001` if another dashboard is already using port `8000`.
 
 Open `http://127.0.0.1:8000`. The dashboard shows packet rate, throughput, parse errors, packet/timestamp gaps, a dense channel grid, quality labels, and a click-through waveform view. Waveforms are min/max decimated for inspection; use the recorded `.nrd`/MED data for lossless comparisons.
 

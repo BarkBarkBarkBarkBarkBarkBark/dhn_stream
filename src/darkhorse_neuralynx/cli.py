@@ -49,6 +49,15 @@ app = typer.Typer(
 )
 console = Console()
 
+DEFAULT_DASHBOARD_FILE = "/mnt/MED_Data_iSSD/DA-075-RawData.nrd"
+DEFAULT_DASHBOARD_CHANNEL_CONFIG = "/home/dhn/DHN/DHN_Acq/DHN_Acq_cs.csv"
+DEFAULT_DASHBOARD_CONNECTION_MAP = "/mnt/MED_Data_iSSD/DA075_connection_map.xlsx"
+
+
+def _default_existing_path(path: str) -> str:
+    """Return a local default path only when it exists on this machine."""
+    return path if Path(path).exists() else ""
+
 
 def _start_enter_listener() -> threading.Event:
     """Return an event that is set once stdin receives Enter or EOF."""
@@ -138,6 +147,7 @@ def stream(
     send_buffer: Annotated[int, typer.Option("--send-buffer", help="UDP socket send buffer bytes")] = 8_388_608,
     mirror_host: Annotated[str, typer.Option("--mirror-host", help="Optional UDP mirror host for dashboard/probe inspection")] = "",
     mirror_port: Annotated[int, typer.Option("--mirror-port", help="UDP mirror destination port")] = 26091,
+    dashboard_mirror: Annotated[bool, typer.Option("--dashboard-mirror", help="Mirror packets to the local dashboard at 127.0.0.1:26091")] = False,
     duration: Annotated[float, typer.Option("--duration", "-d", help="Run duration in seconds (0 = infinite)")] = 0.0,
     prime_until_enter: Annotated[
         bool,
@@ -200,6 +210,8 @@ def stream(
     total_packets = 0
     total_bytes = 0
     total_underruns = 0
+    if dashboard_mirror and not mirror_host:
+        mirror_host = "127.0.0.1"
     mirror_targets = ((mirror_host, mirror_port),) if mirror_host else ()
     mirror_packets = 0
     mirror_bytes = 0
@@ -404,25 +416,40 @@ def dashboard(
     udp_port: Annotated[int, typer.Option("--udp-port", help="UDP port for mirrored NRD packets")] = 26091,
     sample_rate: Annotated[int, typer.Option("--sample-rate", "-r", help="Sample rate in Hz")] = 32_000,
     channels: Annotated[int, typer.Option("--channels", "-c", help="Expected channels (0 = infer from file or first packet)")] = 0,
-    nrd_file: Annotated[str, typer.Option("--file", help="Optional .nrd file for layout/file stats")] = "",
-    channel_config: Annotated[str, typer.Option("--channel-config", help="Optional DHN_Acq_cs.csv/tsv for labels")] = "",
-    connection_map: Annotated[str, typer.Option("--connection-map", help="Optional CSV/TSV/XLSX connection map for labels")] = "",
+    nrd_file: Annotated[str, typer.Option("--file", help="Optional .nrd file for layout/file stats")] = DEFAULT_DASHBOARD_FILE,
+    channel_config: Annotated[
+        str,
+        typer.Option("--channel-config", help="Optional DHN_Acq_cs.csv/tsv for labels"),
+    ] = DEFAULT_DASHBOARD_CHANNEL_CONFIG,
+    connection_map: Annotated[
+        str,
+        typer.Option("--connection-map", help="Optional CSV/TSV/XLSX connection map for labels"),
+    ] = DEFAULT_DASHBOARD_CONNECTION_MAP,
     waveform_seconds: Annotated[float, typer.Option("--waveform-seconds", help="Seconds kept in waveform ring buffer")] = 1.0,
 ) -> None:
     """Launch the optional local waveform inspection dashboard."""
     try:
-        import uvicorn
-        from darkhorse_neuralynx.dashboard.app import create_dashboard_app
+        from darkhorse_neuralynx.dashboard.server import run_dashboard_server
     except ImportError as exc:
-        console.print(
-            "[red]Dashboard dependencies are missing.[/red] "
-            "Install with: [cyan]uv pip install -e '.[dashboard]'[/cyan]"
-        )
+        console.print(f"[red]Dashboard import failed:[/red] {exc}")
         raise typer.Exit(1) from exc
 
     expected_channels = channels if channels > 0 else None
+    nrd_file = nrd_file if nrd_file != DEFAULT_DASHBOARD_FILE else _default_existing_path(nrd_file)
+    channel_config = (
+        channel_config
+        if channel_config != DEFAULT_DASHBOARD_CHANNEL_CONFIG
+        else _default_existing_path(channel_config)
+    )
+    connection_map = (
+        connection_map
+        if connection_map != DEFAULT_DASHBOARD_CONNECTION_MAP
+        else _default_existing_path(connection_map)
+    )
     try:
-        dashboard_app = create_dashboard_app(
+        run_dashboard_server(
+            web_host=web_host,
+            web_port=web_port,
             udp_host=udp_host,
             udp_port=udp_port,
             sample_rate_hz=sample_rate,
@@ -432,15 +459,9 @@ def dashboard(
             connection_map=connection_map,
             waveform_seconds=waveform_seconds,
         )
-    except (FileNotFoundError, ValueError, ImportError) as exc:
+    except (FileNotFoundError, ValueError, ImportError, OSError) as exc:
         console.print(f"[red]Could not start dashboard: {exc}[/red]")
         raise typer.Exit(1)
-
-    console.print(
-        f"[green]Dashboard listening at[/green] http://{web_host}:{web_port} "
-        f"[dim](NRD UDP mirror udp://{udp_host}:{udp_port})[/dim]"
-    )
-    uvicorn.run(dashboard_app, host=web_host, port=web_port)
 
 
 @app.command()
